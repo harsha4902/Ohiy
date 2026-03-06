@@ -1,0 +1,50 @@
+import pandas as pd
+
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+
+from models.openai_models import load_embeddings
+from config import DATA_PATH
+
+
+def load_documents():
+
+    df = pd.read_csv(DATA_PATH)
+
+    docs = []
+
+    for _, row in df.iterrows():
+
+        text = f"""
+        CVE ID: {row['CVE-ID']}
+        Severity: {row['SEVERITY']}
+        Description: {row['DESCRIPTION']}
+        CWE: {row['CWE-ID']}
+        """
+
+        docs.append(Document(page_content=text))
+
+    return docs
+
+
+def build_vectorstore():
+
+    docs = load_documents()
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=100
+    )
+
+    chunks = splitter.split_documents(docs)
+
+    embeddings = load_embeddings()
+
+    vectordb = Chroma.from_documents(
+        chunks,
+        embedding=embeddings,
+        persist_directory="vectordb"
+    )
+
+    return vectordb
