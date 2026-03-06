@@ -1,0 +1,61 @@
+import os
+import httpx
+import requests
+
+from langchain_openai import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
+
+from config import BASE_URL, API_KEY, LLM_MODEL, EMBEDDING_MODEL
+
+
+# -------- Global SSL/Request Patching --------
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+original_get = requests.get
+
+def patched_get(*args, **kwargs):
+    kwargs['verify'] = False
+    return original_get(*args, **kwargs)
+
+requests.get = patched_get
+
+
+# -------- Tiktoken Cache --------
+
+os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(os.getcwd(), "tiktoken_cache")
+
+
+# -------- HTTP Client --------
+
+client = httpx.Client(verify=False)
+
+
+# -------- LLM --------
+
+def load_llm():
+
+    llm = ChatOpenAI(
+        base_url=BASE_URL,
+        model=LLM_MODEL,
+        api_key=API_KEY,
+        http_client=client,
+        temperature=0.2
+    )
+
+    return llm
+
+
+# -------- Embeddings --------
+
+def load_embeddings():
+
+    embeddings = OpenAIEmbeddings(
+        base_url=BASE_URL,
+        model=EMBEDDING_MODEL,
+        api_key=API_KEY,
+        http_client=client
+    )
+
+    return embeddings
