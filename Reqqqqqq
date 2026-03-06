@@ -1,0 +1,10 @@
+streamlit
+langchain
+langchain-community
+langchain-openai
+langgraph
+chromadb
+pandas
+httpx
+tiktoken
+pypdf
