@@ -1,0 +1,290 @@
+###############################################
+# STEP 1 — IMPORT LIBRARIES
+###############################################
+
+import os
+import httpx
+import requests
+import pandas as pd
+import streamlit as st
+
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+from langchain.prompts import ChatPromptTemplate
+
+from langgraph.graph import StateGraph, END
+
+
+###############################################
+# STEP 2 — GLOBAL SSL / REQUEST PATCHING
+# Used in corporate environments with SSL issues
+###############################################
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+original_get = requests.get
+
+def patched_get(*args, **kwargs):
+    kwargs["verify"] = False
+    return original_get(*args, **kwargs)
+
+requests.get = patched_get
+
+client = httpx.Client(verify=False)
+
+
+###############################################
+# STEP 3 — TIKTOKEN LOCAL CACHE
+###############################################
+
+os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(os.getcwd(), "tiktoken_cache")
+
+
+###############################################
+# STEP 4 — LLM AND EMBEDDING SETUP
+###############################################
+
+llm = ChatOpenAI(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-gpt-4o",
+    api_key="YOUR_API_KEY",
+    http_client=client,
+)
+
+embedding_model = OpenAIEmbeddings(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-text-embedding-3-large",
+    api_key="YOUR_API_KEY",
+    http_client=client,
+)
+
+
+###############################################
+# STEP 5 — LOAD DATA FILES
+# Load CVE CSV + remediation + incident notes
+###############################################
+
+def load_data():
+
+    docs = []
+
+    df = pd.read_csv("data/cve_data.csv")
+
+    for _, row in df.iterrows():
+
+        text = f"""
+        CVE ID: {row['CVE-ID']}
+        Severity: {row['SEVERITY']}
+        Description: {row['DESCRIPTION']}
+        CWE: {row['CWE-ID']}
+        """
+
+        docs.append(Document(page_content=text))
+
+    with open("data/remediation_notes.txt") as f:
+        docs.append(Document(page_content=f.read()))
+
+    with open("data/incident_reports.txt") as f:
+        docs.append(Document(page_content=f.read()))
+
+    return docs
+
+
+###############################################
+# STEP 6 — TEXT CHUNKING
+# Splits large documents for embedding
+###############################################
+
+def chunk_documents(documents):
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=150
+    )
+
+    return splitter.split_documents(documents)
+
+
+###############################################
+# STEP 7 — VECTOR DATABASE CREATION
+###############################################
+
+def create_vectordb(chunks):
+
+    vectordb = Chroma.from_documents(
+        documents=chunks,
+        embedding=embedding_model,
+        persist_directory="vectordb"
+    )
+
+    return vectordb
+
+
+###############################################
+# STEP 8 — RETRIEVER
+# Retrieves most relevant chunks for query
+###############################################
+
+def get_retriever(vectordb):
+
+    return vectordb.as_retriever(search_kwargs={"k": 4})
+
+
+###############################################
+# STEP 9 — PROMPT TEMPLATE
+###############################################
+
+prompt = ChatPromptTemplate.from_template("""
+
+You are a cybersecurity vulnerability analysis assistant.
+
+User Query:
+{question}
+
+Relevant Data:
+{context}
+
+Provide:
+
+1. Vulnerability Summary
+2. Risk Severity
+3. Attack Impact
+4. Recommended Remediation
+5. Security Best Practices
+
+""")
+
+
+###############################################
+# STEP 10 — GENERATION FUNCTION
+###############################################
+
+def generate_answer(question, retriever):
+
+    docs = retriever.invoke(question)
+
+    context = "\n".join([d.page_content for d in docs])
+
+    chain = prompt | llm
+
+    result = chain.invoke({
+        "question": question,
+        "context": context
+    })
+
+    return result.content
+
+
+###############################################
+# STEP 11 — LANGGRAPH WORKFLOW
+###############################################
+
+def build_graph(retriever):
+
+    class GraphState(dict):
+        pass
+
+    def retrieve(state):
+
+        question = state["question"]
+
+        docs = retriever.invoke(question)
+
+        return {"docs": docs}
+
+    def generate(state):
+
+        question = state["question"]
+
+        context = "\n".join([d.page_content for d in state["docs"]])
+
+        chain = prompt | llm
+
+        result = chain.invoke({
+            "question": question,
+            "context": context
+        })
+
+        return {"answer": result.content}
+
+    workflow = StateGraph(GraphState)
+
+    workflow.add_node("retrieve", retrieve)
+    workflow.add_node("generate", generate)
+
+    workflow.set_entry_point("retrieve")
+
+    workflow.add_edge("retrieve", "generate")
+    workflow.add_edge("generate", END)
+
+    return workflow.compile()
+
+
+###############################################
+# STEP 12 — INITIALIZE RAG SYSTEM
+###############################################
+
+@st.cache_resource
+def initialize_system():
+
+    docs = load_data()
+
+    chunks = chunk_documents(docs)
+
+    vectordb = create_vectordb(chunks)
+
+    retriever = get_retriever(vectordb)
+
+    graph = build_graph(retriever)
+
+    return graph
+
+
+###############################################
+# STEP 13 — STREAMLIT UI
+###############################################
+
+st.title("🔐 Cybersecurity Vulnerability RAG Assistant")
+
+graph = initialize_system()
+
+col1, col2 = st.columns([1,2])
+
+
+###############################################
+# LEFT PANEL — SUMMARY
+###############################################
+
+with col1:
+
+    st.subheader("📊 Vulnerability Summary")
+
+    if "summary" not in st.session_state:
+        st.session_state.summary = "No query yet"
+
+    st.write(st.session_state.summary)
+
+
+###############################################
+# RIGHT PANEL — CHAT
+###############################################
+
+with col2:
+
+    st.subheader("💬 Security Chat Assistant")
+
+    query = st.text_input("Enter CVE ID or vulnerability question")
+
+    if st.button("Analyze"):
+
+        result = graph.invoke({"question": query})
+
+        answer = result["answer"]
+
+        st.session_state.summary = answer[:400]
+
+        st.write(answer)
