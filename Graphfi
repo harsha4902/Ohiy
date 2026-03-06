@@ -1,0 +1,31 @@
+from langgraph.graph import StateGraph
+
+from rag.rag_pipeline import build_rag
+
+
+class GraphState(dict):
+    pass
+
+
+def query_node(state):
+
+    rag = build_rag()
+
+    response = rag.run(state["query"])
+
+    return {"result": response}
+
+
+def build_graph():
+
+    builder = StateGraph(GraphState)
+
+    builder.add_node("rag_query", query_node)
+
+    builder.set_entry_point("rag_query")
+
+    builder.set_finish_point("rag_query")
+
+    graph = builder.compile()
+
+    return graph
