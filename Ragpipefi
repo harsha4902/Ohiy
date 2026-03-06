@@ -1,0 +1,22 @@
+from langchain.chains import RetrievalQA
+
+from models.openai_models import load_llm
+from ingestion.ingest import build_vectorstore
+
+
+def build_rag():
+
+    vectordb = build_vectorstore()
+
+    retriever = vectordb.as_retriever(
+        search_kwargs={"k": 4}
+    )
+
+    llm = load_llm()
+
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever
+    )
+
+    return qa_chain
