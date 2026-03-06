@@ -1,0 +1,135 @@
+import os
+import re
+import pandas as pd # Added for CSV support
+import requests
+import tempfile
+import httpx
+import gc
+import uuid
+import streamlit as st
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+# --- 1. SSL & Connection Setup ---
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+original_get = requests.get
+def patched_get(*args, **kwargs):
+    kwargs['verify'] = False
+    return original_get(*args, **kwargs)
+requests.get = patched_get
+
+os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(os.getcwd(), "tiktoken_cache")
+client = httpx.Client(verify=False)
+
+# --- 2. LLM and Embedding setup ---
+llm = ChatOpenAI(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-gpt-4o",
+    api_key="your_api_key_here", 
+    http_client=client,
+    temperature=0.3
+)
+
+embedding_model = OpenAIEmbeddings(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-text-embedding-3-large",
+    api_key="your_api_key_here",
+    http_client=client,
+)
+
+# --- 3. KB Generator Logic (Updated for CSV) ---
+def initialize_kb_generator(uploaded_files):
+    gc.collect()
+    combined_text = ""
+
+    for upload_file in uploaded_files:
+        try:
+            # Load CSV into a DataFrame
+            df = pd.read_csv(upload_file)
+            
+            # Convert the entire DataFrame to a string representation
+            # This turns each row into a structured text snippet for the RAG
+            raw_text = df.to_string(index=False)
+
+            # Step 2: Sanitization (Hackathon safety)
+            problematic_keywords = ["females", "males", "female", "male"]
+            for word in problematic_keywords:
+                raw_text = re.sub(r'\b' + word + r'\b', "user", raw_text, flags=re.IGNORECASE)
+            
+            combined_text += f"\n--- Source File: {upload_file.name} ---\n" + raw_text
+        except Exception as e:
+            st.error(f"Error reading {upload_file.name}: {e}")
+
+    # Step 3: Chunking (CSV data is dense, so keep chunks slightly smaller but with high overlap)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=250)
+    chunks = text_splitter.split_text(combined_text)
+
+    session_id = f"kb_collection_{uuid.uuid4().hex}"
+    vectordb = Chroma.from_texts(
+        texts=chunks,
+        embedding=embedding_model,
+        collection_name=session_id
+    )
+
+    retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 8})
+
+    prompt = ChatPromptTemplate.from_template(
+        """You are an Application Maintenance Knowledge Base Generator.
+        You have been provided with CSV log data and incident reports. 
+        Synthesize this data into a professional KB Article.
+        
+        REQUIRED SECTIONS:
+        ## 1. Problem Description
+        ## 2. Root Cause Analysis (RCA) - Reference specific timestamps or rows from the CSV if available.
+        ## 3. Resolution Steps (Step-by-Step)
+        ## 4. References & Data Snippets
+
+        Context: {context}
+        Incident/Topic: {input}
+        
+        Generate the content in clear Markdown format:"""
+    )
+
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    return create_retrieval_chain(retriever, document_chain)
+
+# --- 4. Streamlit UI ---
+st.set_page_config(page_title="CSV KB Auto-Generator", layout="wide")
+st.title("📊 CSV Maintenance KB Auto-Generator")
+st.markdown("Automate documentation from CSV logs and incident data.")
+
+uploaded_files = st.file_uploader(
+    "Upload CSV Incident Logs", 
+    type="csv", # Changed to CSV
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    if "kb_chain" not in st.session_state:
+        with st.spinner("Processing CSV data..."):
+            st.session_state.kb_chain = initialize_kb_generator(uploaded_files)
+            st.success("CSV Data Indexed.")
+
+    st.divider()
+    topic = st.text_input("Incident ID or Analysis Topic:", placeholder="e.g., Row-level errors in payment processing")
+
+    if st.button("Generate KB Article"):
+        if topic:
+            with st.spinner("Analyzing CSV Rows..."):
+                response = st.session_state.kb_chain.invoke({"input": topic})
+                article_md = response["answer"]
+                
+                st.subheader("📝 Generated Article")
+                st.markdown(article_md)
+                
+                st.download_button(
+                    label="Download .md Article",
+                    data=article_md,
+                    file_name="KB_Article.md",
+                    mime="text/markdown"
+                )
