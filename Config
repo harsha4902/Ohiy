@@ -1,9 +1,10 @@
-API_KEY = "YOUR_API_KEY"
+import os
 
-BASE_URL = "https://genailab.tcs.in"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-LLM_MODEL = "azure/genailab-maas-gpt-4o"
+EMBEDDING_MODEL = "text-embedding-3-large"
+LLM_MODEL = "gpt-4o"
 
-EMBEDDING_MODEL = "azure/genailab-maas-text-embedding-3-large"
-
-VECTOR_DB_PATH = "vectordb"
+VECTOR_DB_DIR = "vector_db"
+DATA_DIR = "data"
+TOKENIZER_CACHE = "tokenizer_cache"
