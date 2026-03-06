@@ -1,7 +1,9 @@
-OPENAI_API_KEY = "YOUR_OPENAI_KEY"
+API_KEY = "YOUR_API_KEY"
+
+BASE_URL = "https://genailab.tcs.in"
 
 LLM_MODEL = "azure/genailab-maas-gpt-4o"
-EMBED_MODEL = "azure/genailab-maas-text-embedding-3-large"
 
-CHROMA_DB_DIR = "./chroma_db"
-DATA_PATH = "./data"
+EMBEDDING_MODEL = "azure/genailab-maas-text-embedding-3-large"
+
+VECTOR_DB_PATH = "vectordb"
