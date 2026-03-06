@@ -1,0 +1,129 @@
+import os
+import re
+import pandas as pd
+import requests
+import tempfile
+import httpx
+import gc
+import uuid
+import streamlit as st
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+# --- 1. SSL & Connection Setup ---
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+original_get = requests.get
+def patched_get(*args, **kwargs):
+    kwargs['verify'] = False
+    return original_get(*args, **kwargs)
+requests.get = patched_get
+
+os.environ["TIKTOKEN_CACHE_DIR"] = os.path.join(os.getcwd(), "tiktoken_cache")
+client = httpx.Client(verify=False)
+
+# --- 2. LLM and Embedding setup ---
+llm = ChatOpenAI(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-gpt-4o",
+    api_key="your_api_key_here", 
+    http_client=client,
+    temperature=0.4 # Slightly higher for better "simplification" phrasing
+)
+
+embedding_model = OpenAIEmbeddings(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-text-embedding-3-large",
+    api_key="your_api_key_here",
+    http_client=client,
+)
+
+# --- 3. Vulnerability Agent Logic ---
+def initialize_vuln_agent(uploaded_files):
+    gc.collect()
+    combined_content = ""
+
+    for upload_file in uploaded_files:
+        try:
+            # Handling CSV data considerations
+            df = pd.read_csv(upload_file)
+            raw_text = df.to_string(index=False)
+
+            # Sanitization logic
+            for word in ["females", "males"]:
+                raw_text = re.sub(r'\b' + word + r'\b', "user", raw_text, flags=re.IGNORECASE)
+            
+            combined_content += f"\n--- Source: {upload_file.name} ---\n" + raw_text
+        except Exception as e:
+            st.error(f"Error loading {upload_file.name}: {e}")
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=200)
+    chunks = text_splitter.split_text(combined_content)
+
+    session_id = f"vuln_agent_{uuid.uuid4().hex}"
+    vectordb = Chroma.from_texts(
+        texts=chunks,
+        embedding=embedding_model,
+        collection_name=session_id
+    )
+
+    retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+
+    # PROMPT: Specifically for "Cybersecurity Vulnerability Description Enhancer"
+    prompt = ChatPromptTemplate.from_template(
+        """You are a Cybersecurity Vulnerability Expert. 
+        Your task is to take raw technical vulnerability data and enhance it for different stakeholders.
+
+        STRUCTURE YOUR RESPONSE:
+        ### 🛡️ Enhanced Description
+        [Summarize the vulnerability in simple, non-technical language]
+
+        ### ⚠️ Risk Assessment
+        - **Impact**: [What happens if this is exploited?]
+        - **Urgency**: [How fast should we fix this?]
+
+        ### ✅ Actionable Recommendations
+        [Provide clear, simplified steps for remediation]
+
+        ### 🛠️ Technical Details (For IT)
+        [List CVE IDs, affected versions, and technical root cause]
+
+        Context: {context}
+        Vulnerability/CVE: {input}
+        """
+    )
+
+    document_chain = create_stuff_documents_chain(llm, prompt)
+    return create_retrieval_chain(retriever, document_chain)
+
+# --- 4. Streamlit UI ---
+st.set_page_config(page_title="Vuln Enhancer", layout="wide")
+st.title("🛡️ Cybersecurity Vulnerability Enhancer")
+st.markdown("Transforming raw technical data into actionable risk communication.")
+
+uploaded_files = st.file_uploader("Upload Vulnerability Reports (CSV)", type="csv", accept_multiple_files=True)
+
+if uploaded_files:
+    if "vuln_agent" not in st.session_state:
+        with st.spinner("Analyzing vulnerability database..."):
+            st.session_state.vuln_agent = initialize_vuln_agent(uploaded_files)
+            st.success("Agent Ready.")
+
+    st.divider()
+    user_input = st.text_input("Enter CVE ID or Technical Issue:", placeholder="e.g., CVE-2024-1234")
+
+    if st.button("Enhance & Simplify"):
+        if user_input:
+            with st.spinner("Processing technical details..."):
+                # Invoke agent
+                response = st.session_state.vuln_agent.invoke({"input": user_input})
+                st.subheader("📢 Communicable Insight")
+                st.markdown(response["answer"])
+        else:
+            st.warning("Please enter a vulnerability detail.")
+else:
+    st.info("Upload raw data to begin enhancement.")
