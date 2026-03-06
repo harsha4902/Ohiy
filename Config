@@ -1,1 +1,7 @@
+OPENAI_API_KEY = "YOUR_OPENAI_KEY"
 
+LLM_MODEL = "azure/genailab-maas-gpt-4o"
+EMBED_MODEL = "azure/genailab-maas-text-embedding-3-large"
+
+CHROMA_DB_DIR = "./chroma_db"
+DATA_PATH = "./data"
