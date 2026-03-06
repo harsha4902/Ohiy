@@ -1,0 +1,11 @@
+import os
+
+BASE_URL = "https://genailab.tcs.in"
+
+API_KEY = "YOUR_API_KEY"
+
+LLM_MODEL = "azure/genailab-maas-gpt-4o"
+
+EMBEDDING_MODEL = "azure/genailab-maas-text-embedding-3-large"
+
+DATA_PATH = "data/cve_data.csv"
