@@ -1,0 +1,121 @@
+import os
+import re
+import pandas as pd
+import streamlit as st
+import uuid
+import gc
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+
+# --- 1. Configuration & Security (SSL Bypass per original code) ---
+#
+import requests
+import httpx
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+client = httpx.Client(verify=False)
+
+# --- 2. Model Initialization ---
+#
+llm = ChatOpenAI(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-gpt-4o",
+    api_key="your_api_key_here", 
+    http_client=client,
+    temperature=0.4
+)
+
+embedding_model = OpenAIEmbeddings(
+    base_url="https://genailab.tcs.in",
+    model="azure/genailab-maas-text-embedding-3-large",
+    api_key="your_api_key_here",
+    http_client=client,
+)
+
+# --- 3. Agent Logic with Memory ---
+def get_conversation_chain(uploaded_files):
+    combined_text = ""
+    for file in uploaded_files:
+        df = pd.read_csv(file)
+        # Sanitize sensitive terms as per hackathon safety
+        text = df.to_string(index=False)
+        text = re.sub(r'\b(males|females)\b', "users", text, flags=re.IGNORECASE)
+        combined_text += f"\nFile: {file.name}\n{text}"
+
+    # Indexing
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=200)
+    chunks = splitter.split_text(combined_text)
+    vectorstore = Chroma.from_texts(chunks, embedding_model, collection_name=f"cve_{uuid.uuid4().hex}")
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+    # Contextualizing history
+    context_q_system_prompt = "Given a chat history and the latest user question, formulate a standalone question."
+    context_q_prompt = ChatPromptTemplate.from_messages([
+        ("system", context_q_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    history_aware_retriever = create_history_aware_retriever(llm, retriever, context_q_prompt)
+
+    # Solution-oriented Prompt
+    system_prompt = """You are a Cybersecurity Assistant. Enhance raw vulnerability data into stakeholder-friendly insights.
+    If a vulnerability is identified, ALWAYS provide:
+    1. **Simplified Description**: For non-technical users.
+    2. **Possible Solutions**: Technical patches, configuration changes, or workarounds.
+    3. **Risk Level**: Based on the data.
+    
+    Context: {context}"""
+    
+    qa_prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    return create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+# --- 4. Streamlit Chat Interface ---
+#
+st.set_page_config(page_title="Vuln Agent", layout="wide")
+st.title("🛡️ Cybersecurity Chat Agent")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+with st.sidebar:
+    files = st.file_uploader("Upload Vulnerability Logs (CSV)", type="csv", accept_multiple_files=True)
+    if st.button("Reset Chat"):
+        st.session_state.messages = []
+        st.rerun()
+
+if files and "chat_chain" not in st.session_state:
+    st.session_state.chat_chain = get_conversation_chain(files)
+
+# Display Chat History
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Chat Input
+if prompt := st.chat_input("Ask about a CVE or upload vulnerability details here..."):
+    st.session_state.messages.append({"role": "human", "content": prompt})
+    with st.chat_message("human"):
+        st.markdown(prompt)
+
+    if "chat_chain" in st.session_state:
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing and finding solutions..."):
+                result = st.session_state.chat_chain.invoke({
+                    "input": prompt, 
+                    "chat_history": st.session_state.messages
+                })
+                response = result["answer"]
+                st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+    else:
+        st.warning("Please upload security data first.")
